@@ -1,0 +1,212 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import itertools
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+import random
+import seaborn as sns
+
+def calculate_kge(simulated, observed):
+    r = np.corrcoef(simulated, observed)[0, 1]
+    alpha = np.std(simulated) / np.std(observed)
+    beta = np.mean(simulated) / np.mean(observed)
+    kge = 1 - np.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + (beta - 1) ** 2)
+    return kge
+
+file_paths = [
+    '/Users/zhaozhe/Desktop/Project/Duplicate_CR1000_TerranovaP1New_694441_ALLDATA.csv',
+    '/Users/zhaozhe/Desktop/Project/CR1000_TerranovaP2New_69440_Table1 .csv',
+    '/Users/zhaozhe/Desktop/Project/CR800_TerranovaP3New_45080_Table1.csv'
+]
+
+# Feature processing
+def process_files(file_paths):
+    VWC_features_all = []
+    wetting_drainage_encoded_list_all = []
+    dVWC_dt_list_all = []
+    temperature_list_all = []
+    Oxygen_all = []
+    ORP_all = []
+    Depth_all = []
+
+    for file_path in file_paths:
+        # Read the file
+        T = pd.read_csv(file_path, skiprows=5, low_memory=False)
+
+        time = pd.to_datetime(T.iloc[:, 0], format='%m/%d/%y %H:%M')
+
+        TT = T.iloc[:, 1:].apply(pd.to_numeric, errors='coerce').values  # Convert to numeric
+
+        # Moving average smoothing
+        k = 1000
+        TT_smoothed = pd.DataFrame(TT).rolling(window=k, min_periods=1).mean().values
+
+        # Initialize
+        VWC_features = []
+        wetting_drainage_encoded_list = []
+        dVWC_dt_list = []
+        temperature_list = []
+        depth_list = []
+
+        depths = [20, 60, 100, 250]
+
+        for idx, i in enumerate(range(2, 9, 2)):  # Columns 2, 4, 6, 8
+            TTT = pd.DataFrame(TT_smoothed).rolling(window=k, min_periods=1).mean().values
+
+            # Calculate gradient
+            wd = np.gradient(TTT[:, i - 1], 0.1667)
+            wd[np.abs(wd) < 0.00005] = 0  # Remove very small changes
+
+            # Add features to the list
+            VWC_features.append(TT_smoothed[:, i - 1])
+            dVWC_dt_list.append(np.gradient(TT_smoothed[:, i - 1]))
+            temperature_list.append(TT_smoothed[:, i - 2])  # Temperature in column i-2
+
+            # Wetting-drainage
+            wetting_drainage = np.where(wd >= 0, 'wetting', 'drainage')
+            label_encoder = LabelEncoder()
+            wetting_drainage_encoded = label_encoder.fit_transform(wetting_drainage)
+            wetting_drainage_encoded_list.append(wetting_drainage_encoded)
+
+            # Depth
+            depth_array = np.full_like(TT_smoothed[:, i - 1], depths[idx], dtype=float)
+            depth_list.append(depth_array)
+
+        # Combine feature values
+        VWC_features_all.extend(VWC_features)
+        wetting_drainage_encoded_list_all.extend(wetting_drainage_encoded_list)
+        dVWC_dt_list_all.extend(dVWC_dt_list)
+        temperature_list_all.extend(temperature_list)
+        Depth_all.extend(depth_list)
+
+        # Oxygen and ORP
+        Oxygen = T.iloc[:, [9, 10, 11, 12]].apply(pd.to_numeric, errors='coerce').mean(axis=1).values
+        Oxygen_repeated = np.repeat(Oxygen, 4)  # Repeat to match the length of other features
+        ORP = T.iloc[:, [13, 14, 15, 16]].apply(pd.to_numeric, errors='coerce').mean(axis=1).values
+        ORP_repeated = np.repeat(ORP, 4)
+
+        Oxygen_all.append(Oxygen_repeated)
+        ORP_all.append(ORP_repeated)
+
+    # Concatenate data from all files
+    VWC_combined = np.concatenate(VWC_features_all)
+    wetting_drainage_encoded_combined = np.concatenate(wetting_drainage_encoded_list_all)
+    dVWC_dt_combined = np.concatenate(dVWC_dt_list_all)
+    temperature_combined = np.concatenate(temperature_list_all)
+    Depth_combined = np.concatenate(Depth_all)
+    Oxygen_combined = np.concatenate(Oxygen_all)
+    ORP_combined = np.concatenate(ORP_all)
+
+    # Filter out NaN values
+    mask = (~np.isnan(VWC_combined) & ~np.isnan(Oxygen_combined) & ~np.isnan(dVWC_dt_combined) &
+            ~np.isnan(temperature_combined) & ~np.isnan(Depth_combined) & ~np.isnan(ORP_combined))
+
+    # DataFrame
+    data = pd.DataFrame({
+        'VWC': VWC_combined[mask],
+        'Oxygen': Oxygen_combined[mask],
+        'Temperature': temperature_combined[mask],
+        'Depth': Depth_combined[mask],
+        'wetting_drainage_encoded': wetting_drainage_encoded_combined[mask],
+        'dVWC_dt': dVWC_dt_combined[mask],
+        'ORP': ORP_combined[mask]
+    })
+
+    return data
+
+# Generate dataset
+data = process_files(file_paths)
+
+# Select features
+selected_features = ['Temperature', 'Oxygen', 'VWC']
+
+# Print selected features
+print("Selected features:", selected_features)
+
+# Store MSE and KGE for each iteration
+mse_list = []
+kge_list = []
+
+# Perform 50 random iterations
+for iteration in range(50):
+    # Randomly split the data into training and testing sets
+    X = data[selected_features]
+    y = data['ORP']
+
+    # Split dataset randomly
+    random_state = random.randint(1, 10000)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=random_state)
+
+    # Initialize RandomForestRegressor and set random seed
+    model = RandomForestRegressor(n_estimators=100, random_state=random_state) #If you don't want to be completely random every time, set random state = a fixed number
+
+    # Train the model
+    model.fit(X_train, y_train)
+
+    # Predict on the test set
+    y_pred = model.predict(X_test)
+
+    # Calculate MSE and KGE
+    mse = mean_squared_error(y_test, y_pred)
+    kge = calculate_kge(y_pred, y_test)
+
+    # Add results to the list
+    mse_list.append(mse)
+    kge_list.append(kge)
+
+    # Print results of the current iteration
+    print(f"Iteration {iteration + 1}: MSE = {mse:.6f}, KGE = {kge:.6f}")
+
+# Plot the change of MSE and KGE over 50 iterations
+fig, ax1 = plt.subplots(figsize=(12, 7))
+
+# Plot MSE
+color = 'tab:blue'
+ax1.set_xlabel('Iteration')
+ax1.set_ylabel('MSE', color=color)
+ax1.plot(range(1, 51), mse_list, color=color, marker='o', label='MSE')
+ax1.tick_params(axis='y', labelcolor=color)
+ax1.set_xticks(range(1, 51, 2))  
+
+# Create a second y-axis for KGE
+ax2 = ax1.twinx()
+color = 'tab:red'
+ax2.set_ylabel('KGE', color=color)
+ax2.plot(range(1, 51), kge_list, color=color, marker='x', label='KGE')
+ax2.tick_params(axis='y', labelcolor=color)
+
+# Add title and grid
+plt.title('Change of MSE and KGE over 50 Random Iterations')
+fig.tight_layout()  # Adjust layout to prevent overlap
+plt.grid(True)
+
+# Add legend
+lines_1, labels_1 = ax1.get_legend_handles_labels()
+lines_2, labels_2 = ax2.get_legend_handles_labels()
+plt.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper right')
+
+# Show the plot
+plt.show()
+
+# Plot boxplots of MSE and KGE
+fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+# Boxplot for MSE
+sns.boxplot(y=mse_list, ax=axes[0])
+axes[0].set_title('Boxplot of MSE')
+axes[0].set_ylabel('MSE Value')
+
+# Boxplot for KGE
+sns.boxplot(y=kge_list, ax=axes[1])
+axes[1].set_title('Boxplot of KGE')
+axes[1].set_ylabel('KGE Value')
+
+# Adjust layout
+plt.tight_layout()
+
+# Show boxplots
+plt.show()
